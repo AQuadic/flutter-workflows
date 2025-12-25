@@ -1,0 +1,19 @@
+name: Build Android Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"  # Triggers on version tags like 1.0.0, 2.1.3, etc.
+  workflow_dispatch:  # Allows manual trigger from GitHub UI
+
+jobs:
+  build-android:
+    uses: aquadic/flutter-workflows/.github/workflows/flutter-android-build.yml@v1.0
+    secrets: inherit  # ✅ Pass all secrets automatically
+    # Note: vars (like RUNNER_TYPE) are automatically inherited from the calling repository
+    
+    # Optional: Override default values
+    # with:
+    #   java-version: '17'
+    #   enable-obfuscation: true
+    #   runner-type: 'ubuntu-latest'

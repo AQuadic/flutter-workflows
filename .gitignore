@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# IDE / Editor files
+.idea/
+*.iml
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary & build artifacts
+*.log
+*.tmp
+*~
+
+# Local environment & secrets (safety net)
+.env
+.env.*
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+*.jks
+*.keystore
+service-account*.json
+*.key

@@ -1,0 +1,194 @@
+name: Flutter Windows Build
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: 'New App Name to rename (optional)'
+        required: false
+        type: string
+      enable-msix:
+        description: 'Whether to generate MSIX package'
+        required: false
+        type: boolean
+        default: true
+      find-replace-list:
+        description: |
+          Multiple find & replace operations (one per line)
+          Format: path|find_text|replace_text
+          Example:
+            lib/config|old_url|new_url
+            lib/main.dart|OldApp|NewApp
+        required: false
+        type: string
+      flutter-channel:
+        description: 'Flutter channel'
+        required: false
+        type: string
+        default: 'stable'
+      flutter-version:
+        description: 'Flutter version to use (optional, overrides FVM)'
+        required: false
+        type: string
+      pre-build-script:
+        description: 'Script to run before the build process (e.g. "./scripts/prepare.ps1")'
+        required: false
+        type: string
+      run-tests:
+        description: 'Run unit tests before building if tests exist'
+        required: false
+        type: boolean
+        default: true
+      runner-type:
+        description: 'Runner type to use (default: windows-latest)'
+        required: false
+        type: string
+        default: 'windows-latest'
+
+    secrets:
+      PAT_TOKEN:
+        description: 'Personal Access Token for private Git dependencies (optional)'
+        required: false
+
+jobs:
+  windows-build:
+    runs-on: ${{ inputs.runner-type || 'windows-latest' }}
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Git Authentication for Dependencies
+        shell: pwsh
+        env:
+          AUTH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:AUTH_TOKEN)) {
+            git config --global url."https://$($env:AUTH_TOKEN)@github.com/".insteadOf "https://github.com/"
+            Write-Host "✓ Git authentication configured with token"
+          }
+
+      - name: Configure FVM
+        uses: kuhnroyal/flutter-fvm-config-action/config@v3
+        id: fvm-config-action
+        continue-on-error: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version != '' && inputs.flutter-version || steps.fvm-config-action.outputs.FLUTTER_VERSION }}
+          channel: ${{ inputs.flutter-channel != '' && inputs.flutter-channel || steps.fvm-config-action.outputs.FLUTTER_CHANNEL || 'stable' }}
+          cache: false
+
+      - name: Enable Windows Desktop
+        shell: pwsh
+        run: flutter config --enable-windows-desktop
+
+      - name: Print Flutter Version
+        shell: pwsh
+        run: flutter --version
+
+      - name: Run Pre-Build Script
+        if: ${{ inputs.pre-build-script != '' }}
+        shell: pwsh
+        run: ${{ inputs.pre-build-script }}
+
+      - name: Apply Find & Replace Operations
+        if: ${{ inputs.find-replace-list != '' }}
+        shell: pwsh
+        run: |
+          $operations = @"
+          ${{ inputs.find-replace-list }}
+          "@ -split "`n" | Where-Object { $_.Trim() -ne "" }
+          
+          foreach ($op in $operations) {
+            $parts = $op.Trim() -split '\|'
+            if ($parts.Count -ge 3) {
+              $path = $parts[0].Trim()
+              $find = $parts[1].Trim()
+              $replace = $parts[2].Trim()
+              Write-Host "Replacing in: $path ($find -> $replace)"
+              if (Test-Path $path) {
+                if ((Get-Item $path) -is [System.IO.DirectoryInfo]) {
+                  Get-ChildItem -Path $path -Recurse -File | ForEach-Object {
+                    (Get-Content $_.FullName -Raw) -replace [regex]::Escape($find), $replace | Set-Content $_.FullName
+                  }
+                } else {
+                  (Get-Content $path -Raw) -replace [regex]::Escape($find), $replace | Set-Content $path
+                }
+              }
+            }
+          }
+
+      - name: Check commit message for test skip
+        id: check_skip
+        shell: pwsh
+        run: |
+          $msg = git log -1 --pretty=%B
+          if ($msg -match '\[(skip|no)[- _]?(tests?|ci)\]') {
+            Write-Host "Detected skip tests instruction in commit message."
+            echo "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "skip=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Get Dependencies
+        shell: pwsh
+        run: flutter pub get
+
+      - name: Run Code Generation
+        shell: pwsh
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Run Tests
+        if: inputs.run-tests && steps.check_skip.outputs.skip != 'true'
+        shell: pwsh
+        run: flutter test --reporter expanded
+
+      - name: Build Windows Release Binary
+        shell: pwsh
+        run: flutter build windows --release
+
+      - name: Build MSIX Package
+        if: inputs.enable-msix
+        shell: pwsh
+        run: dart run msix:create
+
+      - name: Prepare Release Files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "release-files" | Out-Null
+          
+          # Compress portable release folder
+          Compress-Archive `
+            -Path "build\windows\x64\runner\Release\*" `
+            -DestinationPath "release-files\windows-release.zip" -Force
+          
+          # Copy any generated MSIX packages
+          if (Test-Path "build\windows\x64\runner\Release\*.msix") {
+            Copy-Item -Path "build\windows\x64\runner\Release\*.msix" -Destination "release-files\" -Force
+          }
+          
+          Get-ChildItem -Path "release-files" | Format-Table Name, Length
+
+      - name: Upload Release Files to Artifacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-${{ github.sha }}
+          path: release-files/*
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Release to GitHub
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release-files/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false

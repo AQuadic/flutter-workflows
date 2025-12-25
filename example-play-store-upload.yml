@@ -1,0 +1,19 @@
+name: Upload to Play Store
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  upload:
+    uses: aquadic/flutter-workflows/.github/workflows/play-store-upload.yml@v1.0
+    secrets: inherit
+    # All done! 🚀
+    
+    # Optional: Override defaults
+    # with:
+    #   use_latest: true              # Use latest release (default: true)
+    #   release_tag: 'v1.2.3'         # Or specify a specific tag
+    #   play_store_track: 'internal'  # Track: internal/alpha/beta/production (default: internal)
+    #   runner-type: 'self-hosted'    # Runner type (default: self-hosted)

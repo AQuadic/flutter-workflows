@@ -1,0 +1,20 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+
+jobs:
+  # Step 1: Build APK + AAB
+  build:
+    uses: aquadic/flutter-workflows/.github/workflows/flutter-android-build.yml@main
+    secrets: inherit
+  
+  # Step 2: Upload to Play Store (only on tag release, auto-skips if secret not available)
+  upload:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    uses: aquadic/flutter-workflows/.github/workflows/play-store-upload.yml@main
+    secrets: inherit

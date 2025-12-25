@@ -1,0 +1,465 @@
+name: Flutter PR Validation
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: 'New App Name to rename (optional)'
+        required: false
+        type: string
+      bundle-id:
+        description: 'New Android Package Name (optional)'
+        required: false
+        type: string
+      find-replace-list:
+        description: |
+          Multiple find & replace operations (one per line)
+          Format: path|find_text|replace_text
+          Example:
+            lib/config|old_url|new_url
+            lib/main.dart|OldApp|NewApp
+            android|com.old.package|com.new.package
+        required: false
+        type: string
+      firebase-project-id:
+        description: 'Firebase Project ID for configuration'
+        required: false
+        type: string
+      flutter-channel:
+        description: 'Flutter channel'
+        required: false
+        type: string
+        default: 'stable'
+      flutter-version:
+        description: 'Flutter version to use (optional, overrides FVM)'
+        required: false
+        type: string
+        default: ''
+      icon-url:
+        description: 'URL to download the app icon (png)'
+        required: false
+        type: string
+      java-version:
+        description: 'Java version to use'
+        required: false
+        type: string
+        default: '17'
+      pre-build-script:
+        description: 'Script to run before the validation process (e.g. "./scripts/prepare.sh")'
+        required: false
+        type: string
+      run-analyze:
+        description: 'Run flutter analyze to check for errors and warnings'
+        required: false
+        type: boolean
+        default: true
+      run-format-check:
+        description: 'Run dart format check to verify code formatting'
+        required: false
+        type: boolean
+        default: false
+      run-tests:
+        description: 'Run unit tests before building if tests exist'
+        required: false
+        type: boolean
+        default: true
+      runner-type:
+        description: 'Runner type to use (default: self-hosted)'
+        required: false
+        type: string
+        default: 'self-hosted'
+
+    secrets:
+      FIREBASE_SERVICE_ACCOUNT:
+        description: 'Firebase Service Account JSON (optional)'
+        required: false
+      PAT_TOKEN:
+        description: 'Personal Access Token for private Git dependencies (optional)'
+        required: false
+
+  workflow_dispatch:
+
+jobs:
+  pr-validation:
+    runs-on: ${{ inputs.runner-type || 'self-hosted' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: ${{ inputs.java-version || '17' }}
+
+      - name: Configure FVM
+        uses: kuhnroyal/flutter-fvm-config-action/config@v3
+        id: fvm-config-action
+        continue-on-error: true
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version != '' && inputs.flutter-version || steps.fvm-config-action.outputs.FLUTTER_VERSION }}
+          channel: ${{ inputs.flutter-channel != '' && inputs.flutter-channel || steps.fvm-config-action.outputs.FLUTTER_CHANNEL || 'stable' }}
+          cache: false
+
+      - name: Flutter version
+        run: flutter --version
+
+      - name: Run Pre-Build Script
+        if: ${{ inputs.pre-build-script != '' }}
+        run: ${{ inputs.pre-build-script }}
+
+      - name: Rename App
+        if: ${{ inputs.app-name != '' }}
+        run: |
+          dart pub global activate rename
+          export PATH="$PATH":"$HOME/.pub-cache/bin"
+          dart pub global run rename setAppName --value "${{ inputs.app-name }}" --targets android
+
+      - name: Change Android Package Name
+        if: ${{ inputs.bundle-id != '' }}
+        run: |
+          dart pub global activate change_app_package_name
+          export PATH="$PATH":"$HOME/.pub-cache/bin"
+          dart pub global run change_app_package_name:main ${{ inputs.bundle-id }}
+
+      - name: Detect Bundle ID
+        id: detect-bundle
+        run: |
+          if [ -n "${{ inputs.bundle-id }}" ]; then
+            PACKAGE_NAME="${{ inputs.bundle-id }}"
+            echo "✓ Using provided bundle-id: $PACKAGE_NAME"
+          else
+            echo "🔍 Attempting to detect bundle ID from project files..."
+            PACKAGE_NAME=""
+          
+            # Attempt 1: android/app/build.gradle
+            if [ -f "android/app/build.gradle" ]; then
+              echo "📄 Found android/app/build.gradle"
+          
+              echo "--- Searching for applicationId ---"
+              grep -i "applicationId" android/app/build.gradle || true
+          
+              PACKAGE_NAME=$(grep -oP 'applicationId\s*["\x27]\K[^"\x27]+' android/app/build.gradle 2>/dev/null | head -n 1)
+          
+              if [ -z "$PACKAGE_NAME" ]; then
+                PACKAGE_NAME=$(grep -oP 'applicationId\s*=\s*["\x27]\K[^"\x27]+' android/app/build.gradle 2>/dev/null | head -n 1)
+              fi
+          
+              if [ -z "$PACKAGE_NAME" ]; then
+                PACKAGE_NAME=$(grep -oP 'applicationId\s+"\K[^"]+' android/app/build.gradle 2>/dev/null | head -n 1)
+              fi
+          
+              if [ -n "$PACKAGE_NAME" ]; then
+                echo "✓ Found in build.gradle: $PACKAGE_NAME"
+              fi
+            else
+              echo "⚠ android/app/build.gradle not found"
+            fi
+          
+            # Attempt 2: android/app/build.gradle.kts (Kotlin DSL)
+            if [ -z "$PACKAGE_NAME" ] && [ -f "android/app/build.gradle.kts" ]; then
+              echo "📄 Found android/app/build.gradle.kts"
+          
+              echo "--- Searching for applicationId in Kotlin DSL ---"
+              grep -i "applicationId" android/app/build.gradle.kts || true
+          
+              PACKAGE_NAME=$(grep -oP 'applicationId\s*=\s*"\K[^"]+' android/app/build.gradle.kts 2>/dev/null | head -n 1)
+          
+              if [ -n "$PACKAGE_NAME" ]; then
+                echo "✓ Found in build.gradle.kts: $PACKAGE_NAME"
+              fi
+            fi
+          
+            # Attempt 3: android/app/src/main/AndroidManifest.xml
+            if [ -z "$PACKAGE_NAME" ] && [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+              echo "📄 Found AndroidManifest.xml"
+          
+              echo "--- Searching for package in AndroidManifest ---"
+              grep -i "package=" android/app/src/main/AndroidManifest.xml || true
+          
+              PACKAGE_NAME=$(grep -oP 'package="\K[^"]+' android/app/src/main/AndroidManifest.xml 2>/dev/null | head -n 1)
+          
+              if [ -n "$PACKAGE_NAME" ]; then
+                echo "✓ Found in AndroidManifest.xml: $PACKAGE_NAME"
+              fi
+            else
+              echo "⚠ AndroidManifest.xml not found"
+            fi
+          
+            # Attempt 4: pubspec.yaml
+            if [ -z "$PACKAGE_NAME" ] && [ -f "pubspec.yaml" ]; then
+              echo "📄 Checking pubspec.yaml"
+              PACKAGE_NAME=$(grep -oP 'package_name:\s*\K.+' pubspec.yaml 2>/dev/null | tr -d ' "' | head -n 1)
+          
+              if [ -n "$PACKAGE_NAME" ]; then
+                echo "✓ Found in pubspec.yaml: $PACKAGE_NAME"
+              fi
+            fi
+          
+            if [ -z "$PACKAGE_NAME" ]; then
+              PACKAGE_NAME="app"
+              echo "⚠ Bundle ID not found, using default: $PACKAGE_NAME"
+            else
+              echo "✅ Successfully detected bundle-id: $PACKAGE_NAME"
+            fi
+          fi
+          
+          echo "bundle-id=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "BUNDLE_ID=$PACKAGE_NAME" >> $GITHUB_ENV
+          echo "📦 Final Bundle ID: $PACKAGE_NAME"
+
+      - name: Update App Icon from URL
+        if: ${{ inputs.icon-url != '' }}
+        run: |
+          dart pub global activate flutter_launcher_icons
+          export PATH="$PATH":"$HOME/.pub-cache/bin"
+
+          TEMP_ICON_DIR=".temp_icons"
+          mkdir -p "$TEMP_ICON_DIR"
+          TEMP_ICON_PATH="$TEMP_ICON_DIR/icon.png"
+          
+          echo "Downloading icon from: ${{ inputs.icon-url }}"
+          if command -v curl &> /dev/null; then
+            curl -L -o "$TEMP_ICON_PATH" "${{ inputs.icon-url }}"
+          elif command -v wget &> /dev/null; then
+            wget -O "$TEMP_ICON_PATH" "${{ inputs.icon-url }}"
+          else
+            echo "Error: Neither curl nor wget found"
+            exit 1
+          fi
+          
+          if [ ! -f "$TEMP_ICON_PATH" ]; then
+            echo "Failed to download icon"
+            exit 1
+          fi
+          
+          cat > flutter_launcher_icons_temp.yaml <<EOF
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "$TEMP_ICON_PATH"
+            remove_alpha_ios: true
+            adaptive_icon_background: "#ffffff"
+            adaptive_icon_foreground: "$TEMP_ICON_PATH"
+          EOF
+          
+          dart pub global run flutter_launcher_icons -f flutter_launcher_icons_temp.yaml
+          
+          rm -f flutter_launcher_icons_temp.yaml
+          rm -rf "$TEMP_ICON_DIR"
+
+      - name: Detect Firebase Project ID
+        id: detect-firebase
+        run: |
+          PROJECT_ID="${{ inputs.firebase-project-id }}"
+
+          if [ -z "$PROJECT_ID" ]; then
+            # Try .firebaserc first (projects.default)
+            if [ -f ".firebaserc" ] && command -v jq &>/dev/null; then
+              PROJECT_ID=$(jq -r '.projects.default // empty' .firebaserc 2>/dev/null || true)
+              if [ -n "$PROJECT_ID" ]; then
+                echo "✅ Auto-detected Firebase project from .firebaserc: $PROJECT_ID"
+              fi
+            fi
+          fi
+
+          if [ -z "$PROJECT_ID" ]; then
+            # Try firebase.json — search for any projectId field
+            if [ -f "firebase.json" ] && command -v jq &>/dev/null; then
+              PROJECT_ID=$(jq -r 'first(.. | .projectId? | select(type == "string" and length > 0)) // empty' firebase.json 2>/dev/null || true)
+              if [ -n "$PROJECT_ID" ]; then
+                echo "✅ Auto-detected Firebase project from firebase.json: $PROJECT_ID"
+              fi
+            fi
+          fi
+
+          if [ -z "$PROJECT_ID" ] && [ -f "firebase.json" ]; then
+            echo "ℹ firebase.json found but could not extract project ID. Provide firebase-project-id input or add a default alias in .firebaserc."
+          fi
+
+          echo "project-id=$PROJECT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        if: ${{ steps.detect-firebase.outputs.project-id != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure Firebase
+        if: ${{ steps.detect-firebase.outputs.project-id != '' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then
+            echo "⚠ Warning: Firebase Project ID provided, but FIREBASE_SERVICE_ACCOUNT secret is empty. Skipping..."
+            exit 0
+          fi
+          
+          npm install -g firebase-tools
+          dart pub global activate flutterfire_cli
+          export PATH="$PATH":"$HOME/.pub-cache/bin"
+          
+          echo "$FIREBASE_SERVICE_ACCOUNT" > $HOME/service-account.json
+          export GOOGLE_APPLICATION_CREDENTIALS="$HOME/service-account.json"
+          
+          flutterfire configure \
+            --yes \
+            --project=${{ steps.detect-firebase.outputs.project-id }} \
+            --platforms=android \
+            --android-package-name=${{ steps.detect-bundle.outputs.bundle-id }}
+
+      - name: Find and Replace Text
+        if: ${{ inputs.find-replace-list != '' }}
+        run: |
+          set +e
+          
+          echo "========================================="
+          echo "Starting Find & Replace Operations"
+          echo "========================================="
+          
+          OPERATION_NUM=0
+          TOTAL_REPLACED=0
+          
+          while IFS='|' read -r SEARCH_PATH FIND_TEXT REPLACE_TEXT; do
+            [[ -z "$SEARCH_PATH" ]] && continue
+
+            ((OPERATION_NUM++))
+            echo ""
+            echo "--- Operation #$OPERATION_NUM ---"
+            echo "Path: $SEARCH_PATH"
+            echo "Find: $FIND_TEXT"
+            echo "Replace: $REPLACE_TEXT"
+
+            if [ ! -e "$SEARCH_PATH" ]; then
+              echo "⚠ Warning: Path '$SEARCH_PATH' does not exist"
+              continue
+            fi
+
+            if [ -f "$SEARCH_PATH" ]; then
+              if grep -q "$FIND_TEXT" "$SEARCH_PATH"; then
+                sed -i "s|$FIND_TEXT|$REPLACE_TEXT|g" "$SEARCH_PATH"
+                echo "✓ Replaced in: $SEARCH_PATH"
+                ((TOTAL_REPLACED++))
+              else
+                echo "⊘ Text not found in: $SEARCH_PATH"
+              fi
+            elif [ -d "$SEARCH_PATH" ]; then
+              FILES_FOUND=$(find "$SEARCH_PATH" -type f \
+                ! -path "*/.*" \
+                ! -path "*/build/*" \
+                ! -path "*/.dart_tool/*" \
+                ! -path "*/node_modules/*" \
+                ! -name "*.apk" \
+                ! -name "*.aab" \
+                ! -name "*.so" \
+                ! -name "*.jar" \
+                2>/dev/null)
+
+              if [ -z "$FILES_FOUND" ]; then
+                echo "⊘ No files found in directory"
+              else
+                REPLACED_COUNT=0
+                while IFS= read -r file; do
+                  if grep -q "$FIND_TEXT" "$file" 2>/dev/null; then
+                    sed -i "s|$FIND_TEXT|$REPLACE_TEXT|g" "$file"
+                    echo "✓ Replaced in: $file"
+                    ((REPLACED_COUNT++))
+                    ((TOTAL_REPLACED++))
+                  fi
+                done <<< "$FILES_FOUND"
+
+                [ $REPLACED_COUNT -eq 0 ] && echo "⊘ Text not found in any files"
+              fi
+            fi
+          done <<< "${{ inputs.find-replace-list }}"
+          
+          echo ""
+          echo "========================================="
+          echo "Total operations: $OPERATION_NUM"
+          echo "Total files modified: $TOTAL_REPLACED"
+          echo "========================================="
+          
+          set -e
+
+      - name: Configure Git for Dependencies
+        env:
+          AUTH_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+        run: |
+          # Clean any lingering extraheader credentials
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+          # Clean stale git cache on self-hosted runners to prevent corrupted ref listing
+          rm -rf "${PUB_CACHE:-$HOME/.pub-cache}/git" "$HOME/.pub-cache/git" 2>/dev/null || true
+
+          # Authenticate Git with token (PAT or GITHUB_TOKEN) to ensure authenticated downloads
+          if [ -n "$AUTH_TOKEN" ]; then
+            echo "✓ Configuring Git authentication with token"
+            git config --global url."https://${AUTH_TOKEN}@github.com/".insteadOf "https://github.com/"
+            
+            # Configure .netrc for standard Git credentials
+            printf "machine github.com\n  login oauth2\n  password %s\n\nmachine api.github.com\n  login oauth2\n  password %s\n" \
+              "${AUTH_TOKEN}" "${AUTH_TOKEN}" >> ~/.netrc
+            chmod 600 ~/.netrc
+          fi
+
+      - name: Get dependencies
+        env:
+          GIT_TERMINAL_PROMPT: 0
+        run: flutter pub upgrade
+
+      - name: Run build_runner (if available)
+        run: |
+          if grep -q "build_runner:" pubspec.yaml; then
+            echo "Running build_runner..."
+            flutter pub run build_runner build --delete-conflicting-outputs
+          else
+            echo "build_runner not found, skipping..."
+          fi
+
+      - name: Check Code Formatting
+        if: ${{ inputs.run-format-check }}
+        run: |
+          echo "🔍 Checking code formatting..."
+          dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze Code
+        if: ${{ inputs.run-analyze }}
+        run: |
+          echo "🔍 Running flutter analyze..."
+          flutter analyze
+
+      - name: Run Tests
+        if: ${{ inputs.run-tests }}
+        shell: bash
+        run: |
+          # 1. Check commit message for test skip flag
+          commit_msg=$(git log -1 --pretty=%B 2>/dev/null || true)
+          if echo "$commit_msg" | grep -qiE "\[(skip|no)[- _]?(tests?|ci)\]"; then
+            echo "⏩ Skipping tests: commit message contains skip instruction."
+            exit 0
+          fi
+
+          # 2. Check if flutter_test is configured in pubspec.yaml
+          if [ -f "pubspec.yaml" ] && ! grep -q "flutter_test" pubspec.yaml; then
+            echo "ℹ️ 'flutter_test' dependency not found in pubspec.yaml. Skipping tests."
+            exit 0
+          fi
+
+          # 3. Check if test directory exists and contains test files
+          if [ ! -d "test" ] || [ -z "$(find test -name '*_test.dart' -print -quit 2>/dev/null)" ]; then
+            echo "ℹ️ No test files found in test/ directory. Skipping tests."
+            exit 0
+          fi
+
+          echo "🧪 Tests found and flutter_test configured. Running 'flutter test'..."
+          flutter test
+
+      - name: Validation Succeeded
+        run: echo "✅ PR validation passed successfully!"

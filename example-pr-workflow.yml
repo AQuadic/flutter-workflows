@@ -1,0 +1,23 @@
+name: Pull Request Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+  workflow_dispatch:
+
+jobs:
+  validate-pr:
+    uses: aquadic/flutter-workflows/.github/workflows/flutter-pr-validation.yml@v1.0
+    secrets: inherit  # ✅ Pass all secrets automatically
+    # Note: vars (like RUNNER_TYPE) are automatically inherited from the calling repository
+
+    # Optional: Override default values
+    # with:
+    #   runner-type: 'self-hosted'      # default: 'self-hosted'
+    #   java-version: '17'              # default: '17'
+    #   run-analyze: true               # default: true
+    #   run-tests: true                 # default: true
+    #   run-format-check: false         # default: false
