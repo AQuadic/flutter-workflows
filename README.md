@@ -1,6 +1,10 @@
 # Flutter Workflows
 
-Reusable GitHub Actions workflows for Flutter projects.
+Reusable GitHub Actions workflows for Flutter projects by **AQuadic**.
+
+<p align="center">
+  <img src="assets/infographic.png" alt="AQuadic Flutter Workflows Infographic" width="100%">
+</p>
 
 ## Available Workflows
 
